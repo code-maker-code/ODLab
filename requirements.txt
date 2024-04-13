@@ -1,6 +1,6 @@
 pycocotools
-torch
-torchvision
+# torch
+# torchvision
 timm
 scipy
 thop
