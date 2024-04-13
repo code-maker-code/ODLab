@@ -13,19 +13,15 @@ from utils.misc import multiclass_nms
 # ------------------------ You Only Look One-level Feature ------------------------
 class YOLOF(nn.Module):
     def __init__(self, 
-                 device, 
                  cfg,
                  num_classes :int   = 80, 
                  conf_thresh :float = 0.05,
                  nms_thresh  :float = 0.6,
                  topk        :int   = 1000,
-                 trainable   :bool  = False,
                  ca_nms      :bool  = False):
         super(YOLOF, self).__init__()
         # ---------------------- Basic Parameters ----------------------
         self.cfg = cfg
-        self.device = device
-        self.trainable = trainable
         self.topk = topk
         self.num_classes = num_classes
         self.conf_thresh = conf_thresh
@@ -34,13 +30,13 @@ class YOLOF(nn.Module):
 
         # ---------------------- Network Parameters ----------------------
         ## Backbone
-        self.backbone, feat_dims = build_backbone(cfg, trainable&cfg['pretrained'])
+        self.backbone, feat_dims = build_backbone(cfg)
 
         ## Neck
-        self.neck = build_neck(cfg, feat_dims[-1], cfg['head_dim'])
+        self.neck = build_neck(cfg, feat_dims[-1], cfg.head_dim)
         
         ## Heads
-        self.head = build_head(cfg, cfg['head_dim'], cfg['head_dim'], num_classes)
+        self.head = build_head(cfg, cfg.head_dim, cfg.head_dim)
 
     def post_process(self, cls_pred, box_pred):
         """
@@ -85,39 +81,30 @@ class YOLOF(nn.Module):
 
         return bboxes, scores, labels
 
-    @torch.no_grad()
-    def inference_single_image(self, x):
+    def forward(self, src, src_mask=None):
         # ---------------- Backbone ----------------
-        pyramid_feats = self.backbone(x)
+        pyramid_feats = self.backbone(src)
 
         # ---------------- Neck ----------------
         feat = self.neck(pyramid_feats[-1])
 
         # ---------------- Heads ----------------
-        outputs = self.head(feat)
+        outputs = self.head(feat, src_mask)
 
-        # ---------------- PostProcess ----------------
-        cls_pred = outputs["pred_cls"]
-        box_pred = outputs["pred_box"]
-        bboxes, scores, labels = self.post_process(cls_pred, box_pred)
-        # normalize bbox
-        bboxes[..., 0::2] /= x.shape[-1]
-        bboxes[..., 1::2] /= x.shape[-2]
-        bboxes = bboxes.clip(0., 1.)
+        if not self.training:
+            # ---------------- PostProcess ----------------
+            cls_pred = outputs["pred_cls"]
+            box_pred = outputs["pred_box"]
+            bboxes, scores, labels = self.post_process(cls_pred, box_pred)
+            # normalize bbox
+            bboxes[..., 0::2] /= src.shape[-1]
+            bboxes[..., 1::2] /= src.shape[-2]
+            bboxes = bboxes.clip(0., 1.)
 
-        return bboxes, scores, labels
+            outputs = {
+                'scores': scores,
+                'labels': labels,
+                'bboxes': bboxes
+            }
 
-    def forward(self, x, mask=None):
-        if not self.trainable:
-            return self.inference_single_image(x)
-        else:
-            # ---------------- Backbone ----------------
-            pyramid_feats = self.backbone(x)
-
-            # ---------------- Neck ----------------
-            feat = self.neck(pyramid_feats[-1])
-
-            # ---------------- Heads ----------------
-            outputs = self.head(feat, mask)
-
-            return outputs 
+        return outputs 

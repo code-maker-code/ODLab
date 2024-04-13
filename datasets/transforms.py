@@ -4,7 +4,6 @@ Transforms and data augmentation for both image + bbox.
 """
 import PIL
 import random
-import numpy as np
 
 import torch
 import torchvision
@@ -13,12 +12,6 @@ import torchvision.transforms.functional as F
 
 
 # ----------------- Basic transform functions -----------------
-def box_xyxy_to_cxcywh(x):
-    x0, y0, x1, y1 = x.unbind(-1)
-    b = [(x0 + x1) / 2, (y0 + y1) / 2,
-         (x1 - x0), (y1 - y0)]
-    return torch.stack(b, dim=-1)
-
 def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corners=None):
     return torchvision.ops.misc.interpolate(input, size, scale_factor, mode, align_corners)
 
@@ -250,6 +243,45 @@ class Normalize(object):
                 target["boxes"] = boxes
         return image, target
 
+class RefineBBox(object):
+    def __init__(self, min_box_size=1):
+        self.min_box_size = min_box_size
+
+    def __call__(self, img, target):
+        boxes  = target["boxes"].clone()
+        labels = target["labels"].clone()
+
+        tgt_boxes_wh = boxes[..., 2:] - boxes[..., :2]
+        min_tgt_size = torch.min(tgt_boxes_wh, dim=-1)[0]
+
+        keep = (min_tgt_size >= self.min_box_size)
+
+        target["boxes"] = boxes[keep]
+        target["labels"] = labels[keep]
+
+        return img, target
+
+class ConvertBoxFormat(object):
+    def __init__(self, box_format="xyxy"):
+        self.box_format = box_format
+
+    def __call__(self, image, target=None):
+        # convert box format
+        if self.box_format == "xyxy" or target is None:
+            pass
+        elif self.box_format == "xywh":
+            target = target.copy()
+            if "boxes" in target:
+                boxes_xyxy = target["boxes"]
+                boxes_xywh = torch.zeros_like(boxes_xyxy)
+                boxes_xywh[..., :2] = (boxes_xyxy[..., :2] + boxes_xyxy[..., 2:]) * 0.5   # cxcy
+                boxes_xywh[..., 2:] = boxes_xyxy[..., 2:] - boxes_xyxy[..., :2]           # bwbh
+                target["boxes"] = boxes_xywh
+        else:
+            raise NotImplementedError("Unknown box format: {}".format(self.box_format))
+
+        return image, target
+
 class Compose(object):
     def __init__(self, transforms):
         self.transforms = transforms
@@ -269,48 +301,53 @@ class Compose(object):
 
 
 # build transforms
-def build_transform(cfg=None, is_train=False):
+def build_transform(cfg, is_train=False):
     # ---------------- Transform for Training ----------------
     if is_train:
         transforms = []
-        trans_config = cfg['trans_config']
+        trans_config = cfg.trans_config
         # build transform
-        if not cfg['detr_style']:
+        if not cfg.detr_style:
             for t in trans_config:
                 if t['name'] == 'RandomHFlip':
                     transforms.append(RandomHorizontalFlip())
                 if t['name'] == 'RandomResize':
-                    transforms.append(RandomResize(cfg['train_min_size'], max_size=cfg['train_max_size']))
+                    transforms.append(RandomResize(cfg.train_min_size, max_size=cfg.train_max_size))
                 if t['name'] == 'RandomSizeCrop':
                     transforms.append(RandomSizeCrop(t['min_crop_size'], max_size=t['max_crop_size']))
                 if t['name'] == 'RandomShift':
                     transforms.append(RandomShift(max_shift=t['max_shift']))
+                if t['name'] == 'RefineBBox':
+                    transforms.append(RefineBBox(min_box_size=t['min_box_size']))
             transforms.extend([
                 ToTensor(),
-                Normalize(cfg['pixel_mean'], cfg['pixel_std'], cfg['normalize_coords'])
+                Normalize(cfg.pixel_mean, cfg.pixel_std, cfg.normalize_coords),
+                ConvertBoxFormat(cfg.box_format)
             ])
         # build transform for DETR-style detector
         else:
             transforms = [
                 RandomHorizontalFlip(),
                 RandomSelect(
-                    RandomResize(cfg['train_min_size'], max_size=cfg['train_max_size']),
+                    RandomResize(cfg.train_min_size, max_size=cfg.train_max_size),
                     Compose([
-                        RandomResize(cfg['train_min_size2']),
-                        RandomSizeCrop(*cfg['random_crop_size']),
-                        RandomResize(cfg['train_min_size'], max_size=cfg['train_max_size']),
+                        RandomResize(cfg.train_min_size2),
+                        RandomSizeCrop(*cfg.random_crop_size),
+                        RandomResize(cfg.train_min_size, max_size=cfg.train_max_size),
                     ])
                 ),
                 ToTensor(),
-                Normalize(cfg['pixel_mean'], cfg['pixel_std'], cfg['normalize_coords'])
+                Normalize(cfg.pixel_mean, cfg.pixel_std, cfg.normalize_coords),
+                ConvertBoxFormat(cfg.box_format)
             ]
 
     # ---------------- Transform for Evaluating ----------------
     else:
         transforms = [
-            RandomResize([cfg['test_min_size']], max_size=cfg['test_max_size']),
+            RandomResize(cfg.test_min_size, max_size=cfg.test_max_size),
             ToTensor(),
-            Normalize(cfg['pixel_mean'], cfg['pixel_std'], cfg['normalize_coords'])
+            Normalize(cfg.pixel_mean, cfg.pixel_std, cfg.normalize_coords),
+            ConvertBoxFormat(cfg.box_format)
         ]
     
     return Compose(transforms)

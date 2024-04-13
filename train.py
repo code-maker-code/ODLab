@@ -35,8 +35,6 @@ def parse_args():
     # Model
     parser.add_argument('-m', '--model', default='yolof_r18_c5_1x',
                         help='build object detector')
-    parser.add_argument('-p', '--pretrained', default=None, type=str,
-                        help='load pretrained weight')
     parser.add_argument('-r', '--resume', default=None, type=str,
                         help='keep training')
     # Dataset
@@ -50,8 +48,6 @@ def parse_args():
     parser.add_argument('--num_workers', default=2, type=int, 
                         help='Number of workers used in dataloading')
     # Epoch
-    parser.add_argument('--eval_epoch', default=2, type=int,
-                        help='interval between evaluations')
     parser.add_argument('--save_folder', default='weights/', type=str, 
                         help='path to save weight')
     parser.add_argument('--eval_first', action="store_true", default=False,
@@ -65,8 +61,6 @@ def parse_args():
                         help='number of distributed processes')
     parser.add_argument('--sybn', action='store_true', default=False, 
                         help='use sybn.')
-    parser.add_argument('--find_unused_parameters', action='store_true', default=False, 
-                        help='set find_unused_parameters as True.')
     # Debug setting
     parser.add_argument('--debug', action='store_true', default=False, 
                         help='debug codes.')
@@ -91,12 +85,23 @@ def main():
     os.makedirs(path_to_save, exist_ok=True)
 
     # ---------------------------- Build DDP ----------------------------
-    distributed_utils.init_distributed_mode(args)
-    print("git:\n  {}\n".format(distributed_utils.get_sha()))
+    local_rank = local_process_rank = -1
+    if args.distributed:
+        distributed_utils.init_distributed_mode(args)
+        print("git:\n  {}\n".format(distributed_utils.get_sha()))
+        try:
+            # Multiple Mechine & Multiple GPUs (world size > 8)
+            local_rank = torch.distributed.get_rank()
+            local_process_rank = int(os.getenv('LOCAL_PROCESS_RANK', '0'))
+        except:
+            # Single Mechine & Multiple GPUs (world size <= 8)
+            local_rank = local_process_rank = torch.distributed.get_rank()
     world_size = distributed_utils.get_world_size()
-    print('World size: {}'.format(world_size))
     per_gpu_batch = args.batch_size // world_size
-
+    print("LOCAL RANK: ", local_rank)
+    print("LOCAL_PROCESS_RANL: ", local_process_rank)
+    print('WORLD SIZE: {}'.format(world_size))
+    
     # ---------------------------- Build CUDA ----------------------------
     if args.cuda and torch.cuda.is_available():
         print('use cuda')
@@ -109,43 +114,45 @@ def main():
 
     # ---------------------------- Build config ----------------------------
     cfg = build_config(args)
-    print('Model config: ', cfg)
 
     # ---------------------------- Build Dataset ----------------------------
     transforms = build_transform(cfg, is_train=True)
-    dataset, dataset_info = build_dataset(args, transforms, is_train=True)
+    dataset    = build_dataset(args, cfg, transforms, is_train=True)
 
     # ---------------------------- Build Dataloader ----------------------------
     train_loader = build_dataloader(args, dataset, per_gpu_batch, collate_fn, is_train=True)
 
     # ---------------------------- Build model ----------------------------
     ## Build model
-    model, criterion = build_model(args, cfg, device, dataset_info['num_classes'], True)
+    model, criterion = build_model(args, cfg, is_val=True)
     model.to(device)
     model_without_ddp = model
-    if args.distributed:
-        model = DDP(model, device_ids=[args.gpu], find_unused_parameters=args.find_unused_parameters)
-        model_without_ddp = model.module
     ## Calcute Params & GFLOPs
     if distributed_utils.is_main_process():
         model_copy = deepcopy(model_without_ddp)
         model_copy.trainable = False
         model_copy.eval()
         compute_flops(model=model_copy,
-                      min_size=cfg['test_min_size'],
-                      max_size=cfg['test_max_size'],
+                      min_size=cfg.test_min_size,
+                      max_size=cfg.test_max_size,
                       device=device)
         del model_copy
     if args.distributed:
         dist.barrier()
 
     # ---------------------------- Build Optimizer ----------------------------
-    cfg['base_lr'] = cfg['base_lr'] * args.batch_size
+    cfg.grad_accumulate = max(cfg.batch_size_base // args.batch_size, 1)
+    cfg.base_lr = cfg.per_image_lr * args.batch_size * cfg.grad_accumulate
     optimizer, start_epoch = build_optimizer(cfg, model_without_ddp, args.resume)
 
     # ---------------------------- Build LR Scheduler ----------------------------
-    wp_lr_scheduler = build_wp_lr_scheduler(cfg, cfg['base_lr'])
+    wp_lr_scheduler = build_wp_lr_scheduler(cfg)
     lr_scheduler    = build_lr_scheduler(cfg, optimizer, args.resume)
+
+    # ---------------------------- Build DDP model ----------------------------
+    if args.distributed:
+        model = DDP(model, device_ids=[args.gpu])
+        model_without_ddp = model.module
 
     # ---------------------------- Build Evaluator ----------------------------
     evaluator = build_evluator(args, cfg, device)
@@ -158,36 +165,46 @@ def main():
     # ----------------------- Training -----------------------
     print("Start training")
     best_map = -1.
-    for epoch in range(start_epoch, cfg['max_epoch']):
+    for epoch in range(start_epoch, cfg.max_epoch):
         if args.distributed:
             train_loader.batch_sampler.sampler.set_epoch(epoch)
 
         # Train one epoch
-        train_one_epoch(cfg, model, criterion, train_loader, optimizer, device, epoch,
-                        cfg['max_epoch'], cfg['clip_max_norm'], args.vis_tgt, wp_lr_scheduler,
-                        dataset_info['class_labels'], debug=args.debug)
+        train_one_epoch(cfg,
+                        model,
+                        criterion,
+                        train_loader,
+                        optimizer,
+                        device,
+                        epoch,
+                        args.vis_tgt,
+                        wp_lr_scheduler,
+                        debug=args.debug)
         
         # LR Scheduler
         lr_scheduler.step()
 
         # Evaluate
         if distributed_utils.is_main_process():
-            if (epoch % args.eval_epoch) == 0 or (epoch == cfg['max_epoch'] - 1):
+            model_eval = model_without_ddp
+            to_save = False
+            if (epoch % cfg.eval_epoch) == 0 or (epoch == cfg.max_epoch - 1):
                 if evaluator is None:
-                    cur_map = 0.
+                    to_save = True
                 else:
-                    evaluator.evaluate(model_without_ddp)
-                    cur_map = evaluator.map
-                # Save model
-                if cur_map > best_map:
-                    # update best-map
-                    best_map = cur_map
+                    evaluator.evaluate(model_eval)
+                    # Save model
+                    if evaluator.map >= best_map:
+                        best_map = evaluator.map
+                        to_save = True
+
+                if to_save:
                     # save model
-                    print('Saving state, epoch:', epoch + 1)
-                    torch.save({'model':        model_without_ddp.state_dict(),
+                    print('Saving state, epoch:', epoch)
+                    torch.save({'model':        model_eval.state_dict(),
                                 'optimizer':    optimizer.state_dict(),
                                 'lr_scheduler': lr_scheduler.state_dict(),
-                                'mAP':          round(cur_map*100, 1),
+                                'mAP':          round(best_map*100, 1),
                                 'epoch':        epoch,
                                 'args':         args}, 
                                 os.path.join(path_to_save, '{}_best.pth'.format(args.model)))

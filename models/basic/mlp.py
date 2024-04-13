@@ -16,8 +16,6 @@ def get_activation(act_type=None):
         return nn.Identity()
 
 class MLP(nn.Module):
-    """ Very simple multi-layer perceptron (also called FFN)"""
-
     def __init__(self, in_dim, hidden_dim, out_dim, num_layers):
         super().__init__()
         self.num_layers = num_layers
@@ -30,20 +28,27 @@ class MLP(nn.Module):
         return x
 
 class FFN(nn.Module):
-    def __init__(self, d_model=256, mlp_ratio=4.0, dropout=0., act_type='relu'):
+    def __init__(self, d_model=256, ffn_dim=1024, dropout=0., act_type='relu', pre_norm=False):
         super().__init__()
-        self.fpn_dim = round(d_model * mlp_ratio)
-        self.linear1 = nn.Linear(d_model, self.fpn_dim)
+        # ----------- Basic parameters -----------
+        self.pre_norm = pre_norm
+        self.ffn_dim = ffn_dim
+        # ----------- Network parameters -----------
+        self.linear1 = nn.Linear(d_model, self.ffn_dim)
         self.activation = get_activation(act_type)
         self.dropout2 = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(self.fpn_dim, d_model)
+        self.linear2 = nn.Linear(self.ffn_dim, d_model)
         self.dropout3 = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, src):
-        src2 = self.linear2(self.dropout2(self.activation(self.linear1(src))))
-        src = src + self.dropout3(src2)
-        src = self.norm(src)
+        if self.pre_norm:
+            src = self.norm(src)
+            src2 = self.linear2(self.dropout2(self.activation(self.linear1(src))))
+            src = src + self.dropout3(src2)
+        else:
+            src2 = self.linear2(self.dropout2(self.activation(self.linear1(src))))
+            src = src + self.dropout3(src2)
+            src = self.norm(src)
         
         return src
-    

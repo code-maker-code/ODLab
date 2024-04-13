@@ -4,9 +4,9 @@
 import time
 import datetime
 import numpy as np
-from typing import List
-from thop import profile
-from collections import defaultdict, deque
+from   typing import List
+from   thop import profile
+from   collections import defaultdict, deque
 
 import torch
 import torch.nn as nn
@@ -292,6 +292,11 @@ def fuse_conv_bn(module):
 
 ## compute FLOPs & Parameters
 def compute_flops(model, min_size, max_size, device):
+    if isinstance(min_size[0], List):
+        min_size, max_size = min_size[0]
+    else:
+        min_size = min_size[0]
+
     x = torch.randn(1, 3, min_size, max_size).to(device)
     print('==============================')
     flops, params = profile(model, inputs=(x, ), verbose=False)
@@ -331,6 +336,8 @@ def get_total_grad_norm(parameters, norm_type=2):
                             norm_type)
     return total_norm
 
+
+# ---------------------------- For Loss ----------------------------
 ## focal loss
 def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
     """

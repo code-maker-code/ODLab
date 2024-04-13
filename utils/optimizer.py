@@ -2,40 +2,40 @@ import torch
 from torch import optim
 
 
-def build_optimizer(optimizer_cfg, model, resume=None):
+def build_optimizer(cfg, model, resume=None):
     print('==============================')
-    print('Optimizer: {}'.format(optimizer_cfg['optimizer']))
-    print('--base_lr: {}'.format(optimizer_cfg['base_lr']))
-    print('--backbone_lr_ratio: {}'.format(optimizer_cfg['backbone_lr_ratio']))
-    print('--momentum: {}'.format(optimizer_cfg['momentum']))
-    print('--weight_decay: {}'.format(optimizer_cfg['weight_decay']))
+    print('Optimizer: {}'.format(cfg.optimizer))
+    print('--base_lr: {}'.format(cfg.base_lr))
+    print('--backbone_lr_ratio: {}'.format(cfg.bk_lr_ratio))
+    print('--momentum: {}'.format(cfg.momentum))
+    print('--weight_decay: {}'.format(cfg.weight_decay))
 
     param_dicts = [
         {"params": [p for n, p in model.named_parameters() if "backbone" not in n and p.requires_grad]},
         {
             "params": [p for n, p in model.named_parameters() if "backbone" in n and p.requires_grad],
-            "lr": optimizer_cfg['base_lr'] * optimizer_cfg['backbone_lr_ratio'],
+            "lr": cfg.base_lr * cfg.bk_lr_ratio,
         },
     ]
 
-    if optimizer_cfg['optimizer'] == 'sgd':
+    if cfg.optimizer == 'sgd':
         optimizer = optim.SGD(
             params=param_dicts, 
-            lr=optimizer_cfg['base_lr'],
-            momentum=optimizer_cfg['momentum'],
-            weight_decay=optimizer_cfg['weight_decay']
+            lr=cfg.base_lr,
+            momentum=cfg.momentum,
+            weight_decay=cfg.weight_decay
             )
                                 
-    elif optimizer_cfg['optimizer'] == 'adamw':
+    elif cfg.optimizer == 'adamw':
         optimizer = optim.AdamW(
             params=param_dicts, 
-            lr=optimizer_cfg['base_lr'],
-            weight_decay=optimizer_cfg['weight_decay']
+            lr=cfg.base_lr,
+            weight_decay=cfg.weight_decay
             )
                                 
     start_epoch = 0
     if resume is not None:
-        print('keep training: ', resume)
+        print('Load optimzier from the checkpoint: ', resume)
         checkpoint = torch.load(resume)
         # checkpoint state dict
         checkpoint_state_dict = checkpoint.pop("optimizer")

@@ -1,53 +1,28 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import torch
 
-from .retinanet.build import build_retinanet
-from .fcos.build import build_fcos
+from .fcos.build  import build_fcos, build_fcos_rt
 from .yolof.build import build_yolof
-from .detrx.build import build_detrx
 
 
-# build object detector
-def build_model(args, cfg, device, num_classes=80, trainable=False):
-    # RetinaNet    
-    if 'retinanet' in args.model:
-        model, criterion = build_retinanet(cfg, device, num_classes, trainable)
-    # FCOS    
+def build_model(args, cfg, is_val=False):
+    # ------------ build object detector ------------
+    ## RT-FCOS    
+    if   'fcos_rt' in args.model:
+        model, criterion = build_fcos_rt(cfg, is_val)
+    ## FCOS    
     elif 'fcos' in args.model:
-        model, criterion = build_fcos(cfg, device, num_classes, trainable)
-    # YOLOF    
+        model, criterion = build_fcos(cfg, is_val)
+    ## YOLOF    
     elif 'yolof' in args.model:
-        model, criterion = build_yolof(cfg, device, num_classes, trainable)
-    # DETRX    
-    elif 'detrx' in args.model:
-        model, criterion = build_detrx(cfg, device, num_classes, trainable)
-        
-    if trainable:
-        # Load pretrained weight
-        if args.pretrained is not None:
-            print('Loading pretrained weight ...')
-            checkpoint = torch.load(args.pretrained, map_location='cpu')
-            # checkpoint state dict
-            checkpoint_state_dict = checkpoint.pop("model")
-            # model state dict
-            model_state_dict = model.state_dict()
-            # check
-            for k in list(checkpoint_state_dict.keys()):
-                if k in model_state_dict:
-                    shape_model = tuple(model_state_dict[k].shape)
-                    shape_checkpoint = tuple(checkpoint_state_dict[k].shape)
-                    if shape_model != shape_checkpoint:
-                        checkpoint_state_dict.pop(k)
-                        print(k)
-                else:
-                    checkpoint_state_dict.pop(k)
-                    print(k)
-
-            model.load_state_dict(checkpoint_state_dict, strict=False)
-
-        # keep training
+        model, criterion = build_yolof(cfg, is_val)
+    else:
+        raise NotImplementedError("Unknown detector: {}".args.model)
+    
+    if is_val:
+        # ------------ Keep training from the given weight ------------
         if args.resume is not None:
-            print('keep training: ', args.resume)
+            print('Load model from the checkpoint: ', args.resume)
             checkpoint = torch.load(args.resume, map_location='cpu')
             # checkpoint state dict
             checkpoint_state_dict = checkpoint.pop("model")

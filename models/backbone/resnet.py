@@ -13,7 +13,7 @@ from torchvision.models.resnet import (ResNet18_Weights,
                                        ResNet101_Weights)
 
 model_urls = {
-    # imagenet pretrain weights
+    # IN1K-Cls pretrained weights
     'resnet18':  ResNet18_Weights,
     'resnet34':  ResNet34_Weights,
     'resnet50':  ResNet50_Weights,
@@ -59,30 +59,31 @@ class FrozenBatchNorm2d(torch.nn.Module):
         bias = b - rm * scale
         return x * scale + bias
 
-
 # -------------------- ResNet series --------------------
 class ResNet(nn.Module):
-    """ResNet backbone with frozen BatchNorm."""
-    def __init__(self, name: str, res5_dilation: bool, norm_type: str, pretrained_weights: str = "imagenet1k_v1"):
+    """Standard ResNet backbone."""
+    def __init__(self,
+                 name           :str  = "resnet50",
+                 res5_dilation  :bool = False,
+                 norm_type      :str  = "BN",
+                 freeze_at      :int  = 0,
+                 use_pretrained :bool = False):
         super().__init__()
         # Pretrained
-        assert pretrained_weights in [None, "imagenet1k_v1", "imagenet1k_v2"]
-        if pretrained_weights is not None:
-            if name in ('resnet18', 'resnet34'):
-                pretrained_weights = model_urls[name].IMAGENET1K_V1
-            else:
-                if pretrained_weights == "imagenet1k_v1":
-                    pretrained_weights = model_urls[name].IMAGENET1K_V1
-                else:
-                    pretrained_weights = model_urls[name].IMAGENET1K_V2
+        if use_pretrained:
+            pretrained_weights = model_urls[name].IMAGENET1K_V1
         else:
             pretrained_weights = None
-        print('ImageNet pretrained weight: ', pretrained_weights)
+
         # Norm layer
+        print("- Norm layer of backbone: {}".format(norm_type))
         if norm_type == 'BN':
             norm_layer = nn.BatchNorm2d
         elif norm_type == 'FrozeBN':
             norm_layer = FrozenBatchNorm2d
+        else:
+            raise NotImplementedError("Unknown norm type: {}".format(norm_type))
+
         # Backbone
         backbone = getattr(torchvision.models, name)(
             replace_stride_with_dilation=[False, False, res5_dilation],
@@ -90,10 +91,25 @@ class ResNet(nn.Module):
         return_layers = {"layer2": "0", "layer3": "1", "layer4": "2"}
         self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
         self.feat_dims = [128, 256, 512] if name in ('resnet18', 'resnet34') else [512, 1024, 2048]
+ 
         # Freeze
-        for name, parameter in backbone.named_parameters():
-            if 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
-                parameter.requires_grad_(False)
+        print("- Freeze at {}".format(freeze_at))
+        if freeze_at >= 0:
+            for name, parameter in backbone.named_parameters():
+                if freeze_at == 0: # Only freeze stem layer
+                    if 'layer1' not in name and 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
+                        parameter.requires_grad_(False)
+                elif freeze_at == 1: # Freeze stem layer + layer1
+                    if 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
+                        parameter.requires_grad_(False)
+                elif freeze_at == 2: # Freeze stem layer + layer1 + layer2
+                    if 'layer3' not in name and 'layer4' not in name:
+                        parameter.requires_grad_(False)
+                elif freeze_at == 3: # Freeze stem layer + layer1 + layer2 + layer3
+                    if 'layer4' not in name:
+                        parameter.requires_grad_(False)
+                else: # Freeze all resnet's layers
+                    parameter.requires_grad_(False)
 
     def forward(self, x):
         xs = self.body(x)
@@ -105,21 +121,30 @@ class ResNet(nn.Module):
 
 
 # build backbone
-def build_resnet(cfg, pretrained_weight=None):
+def build_resnet(cfg):
     # ResNet series
-    backbone = ResNet(cfg['backbone'], cfg['res5_dilation'], cfg['backbone_norm'], pretrained_weight)
+    backbone = ResNet(
+        name           = cfg.backbone,
+        res5_dilation  = cfg.res5_dilation,
+        norm_type      = cfg.bk_norm,
+        use_pretrained = cfg.use_pretrained,
+        freeze_at      = cfg.freeze_at)
 
     return backbone, backbone.feat_dims
 
 
 if __name__ == '__main__':
-    cfg = {
-        'backbone':      'resnet50',
-        'backbone_norm': 'FrozeBN',
-        'pretrained_weight': 'imagenet1k_v1',
-        'res5_dilation': False,
-    }
-    model, feat_dim = build_resnet(cfg, cfg['pretrained_weight'])
+
+    class FcosBaseConfig(object):
+        def __init__(self):
+            self.backbone = "resnet18"
+            self.bk_norm = "FrozeBN"
+            self.res5_dilation = False
+            self.use_pretrained = True
+            self.freeze_at = 0
+
+    cfg = FcosBaseConfig()
+    model, feat_dim = build_resnet(cfg)
     print(feat_dim)
 
     x = torch.randn(2, 3, 320, 320)
